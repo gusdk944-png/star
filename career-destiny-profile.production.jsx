@@ -1,9 +1,9 @@
 import React, { useState, useRef } from "react";
 /* ------------------------------------------------------------------
-   커리어 운명 프로파일 v2.0
-   + 정밀 사주 계산 엔진 (일주, 절기 판정)
-   + Claude API 교차해석 리포트
-   + 요약 카드 JPG 생성
+   운명 프로파일 v3.0 — 진로 / 연애운 / 재물운 / 궁합 / 신년운세
+   + 정밀 사주 계산 엔진 (년주·월주·일주·시주, 절기 판정)
+   + Claude API 교차해석 리포트 (장르별 프롬프트)
+   + 요약 카드 JPG 생성 + 후기 섹션
    ------------------------------------------------------------------ */
 // ============================================================================
 // 1. 사주 계산 엔진 (임베드)
@@ -326,6 +326,7 @@ function calculateNatalChart(input) {
     return { error: `계산 오류: ${e.message}` };
   }
 }// ============================================================================
+// ============================================================================
 // 2. Claude API 통합
 // ============================================================================
 async function callClaude(systemPrompt, userPrompt, maxTokens = 1000) {
@@ -341,7 +342,17 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 1000) {
   } catch (networkErr) {
     throw new Error("서버(/api/claude)에 연결하지 못했어요: " + networkErr.message);
   }
-  const data = await response.json();
+  const rawBody = await response.text();
+  let data;
+  try {
+    data = JSON.parse(rawBody);
+  } catch (parseErr) {
+    throw new Error(
+      `서버가 JSON이 아닌 응답을 보냈어요 (상태 코드 ${response.status}). ` +
+        `/api/claude 경로가 없거나(404) 배포가 잘못됐을 가능성이 커요 — api/claude.js가 저장소의 "api" 폴더 안에 ` +
+        `제대로 들어가 있는지 확인해보세요. 응답 시작 부분: ${rawBody.slice(0, 120)}`
+    );
+  }
   if (!response.ok) {
     throw new Error(data?.error || `API 호출 실패 (상태 코드 ${response.status})`);
   }
@@ -351,7 +362,8 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 1000) {
     );
   }
   return data.text || "";
-}function extractJson(text) {
+}
+function extractJson(text) {
   const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
   const start = cleaned.indexOf("{");
   const end = cleaned.lastIndexOf("}");
@@ -365,9 +377,94 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 1000) {
       "AI가 준 JSON 형식이 깨져 있어요 (" + parseErr.message + "). 응답 시작 부분: " + cleaned.slice(0, 200)
     );
   }
-}const REPORT_SYSTEM_PROMPT = `당신은 사주명리학과 서양점성술을 모두 정통한 진로 분석 전문가입니다.
-계산 원칙:
-- 사주: 법정시·절입(節入)·진태양시를 반영해 원국·십성·오행·대운·세운의 흐름을 논리적으로 추론하십시오. 년주·월주·일주·시주는 모두 이미 정밀 계산되어 입력값으로 주어지니 그대로 사용하고 다시 추측하지 마십시오. 단, 시주가 "계산 불가"로 표시된 경우(출생시각 미상)에는 참고 수준으로만 다루고 정확도가 낮음을 밝히십시오.
+}
+// ============================================================================
+// 2-1. 장르(운세 종류)별 설정 — 진로 외에 연애·재물·궁합·신년운세를 함께 지원
+// ============================================================================
+const GENRES = {
+  career: {
+    id: "career",
+    label: "진로",
+    emoji: "💼",
+    badge: "CAREER",
+    expertLabel: "진로 분석",
+    concernLabel: "고민",
+    concernPlaceholder: "지금 진로에 대해 어떤 고민이 있으신가요?",
+    needsSecondPerson: false,
+    needsTargetYear: false,
+    needsStage: true,
+    needsPeriod: true,
+    needsRelationshipStatus: false,
+    needsRelationshipDuration: false,
+    reportFocus: `① 핵심 적성·강점·취약점 ② 잘 맞는 역할 3가지 ③ 구체적 직업 TOP10(직업별 사주/점성술 근거·주의점 포함) ④ 단계별 진로전략 ⑤ 업무환경·역할·리듬(개인/팀, 실행/기획, 자율/조직, 단기/장기, 변화/루틴) ⑥ 사업·재물운 — 타고난 구조(사주)와 시기운(점성술 트랜짓) 분리 ⑦ 수익모델·변동성·리스크 ⑧ 최우선 선택과 향후 실행전략 3가지. "기간" 값 기준으로 ⑧ 작성.`,
+  },
+  love: {
+    id: "love",
+    label: "연애운",
+    emoji: "💕",
+    badge: "LOVE",
+    expertLabel: "연애 분석",
+    concernLabel: "궁금한 점",
+    concernPlaceholder: "지금 연애에 대해 궁금한 점이 있으신가요? (짝사랑, 썸, 연애 중 등)",
+    needsSecondPerson: false,
+    needsTargetYear: false,
+    needsStage: false,
+    needsPeriod: true,
+    needsRelationshipStatus: true,
+    needsRelationshipDuration: false,
+    reportFocus: `① 연애 스타일과 매력 포인트 ② 끌리는 상대 유형 ③ 나와 잘 맞는 상대 특징 TOP5(사주·점성술 근거) ④ 연애에서 반복되는 패턴과 주의할 점 ⑤ 시기별 연애운 흐름(현재~가까운 미래, 점성술 트랜짓 기반) ⑥ 현재 연애 여부(연애 중/솔로)에 맞춘 실질적 조언 ⑦ 연애에서 놓치기 쉬운 리스크 ⑧ 최우선 조언 3가지. "기간" 값 기준으로 ⑤·⑧ 작성.`,
+  },
+  wealth: {
+    id: "wealth",
+    label: "재물운",
+    emoji: "💰",
+    badge: "WEALTH",
+    expertLabel: "재물 분석",
+    concernLabel: "고민",
+    concernPlaceholder: "돈·재물과 관련해 어떤 고민이 있으신가요?",
+    needsSecondPerson: false,
+    needsTargetYear: false,
+    needsStage: false,
+    needsPeriod: true,
+    needsRelationshipStatus: false,
+    needsRelationshipDuration: false,
+    reportFocus: `① 타고난 재물 그릇(사주 재성·오행 균형) ② 돈 버는 스타일(직장형/사업형/투자형 등) ③ 저축·투자 성향과 어울리는 자산 종류 ④ 재물 관련 강점과 위험 신호 ⑤ 시기별 재물운 흐름(현재~가까운 미래, 점성술 트랜짓 기반) ⑥ 돈이 새는 패턴과 주의할 점 ⑦ 실질적인 방향 제안 ⑧ 최우선 실행전략 3가지. "기간" 값 기준으로 ⑤·⑧ 작성. 특정 종목·상품을 콕 집어 추천하거나 확정적인 투자조언을 하지 말고, 성향과 방향성 위주로 서술.`,
+  },
+  compatibility: {
+    id: "compatibility",
+    label: "궁합",
+    emoji: "💞",
+    badge: "COMPATIBILITY",
+    expertLabel: "궁합 분석",
+    concernLabel: "궁금한 점",
+    concernPlaceholder: "두 사람의 관계에 대해 궁금한 점이 있으신가요?",
+    needsSecondPerson: true,
+    needsTargetYear: false,
+    needsStage: false,
+    needsPeriod: false,
+    needsRelationshipStatus: false,
+    needsRelationshipDuration: true,
+    reportFocus: `두 사람(A, B)의 사주와 점성술을 모두 비교하여 궁합을 분석하십시오. 두 사람이 사귄 기간("만난 기간")도 참고하여 관계의 현재 단계에 맞는 조언을 포함하십시오. ① 두 사람의 기본 궁합 총평 ② 사주 궁합(일간 합·충, 오행 상생·상극, 십성 궁합) ③ 점성술 시나스트리(두 사람 태양·달·금성·화성 간 주요 각도) ④ 잘 맞는 부분 TOP5 ⑤ 부딪힐 수 있는 부분과 그 이유 TOP5 ⑥ 갈등이 생겼을 때 대처 방향 ⑦ 관계를 오래 유지하기 위한 조언 ⑧ 최우선 조언 3가지.`,
+  },
+  newyear: {
+    id: "newyear",
+    label: "신년운세",
+    emoji: "🎊",
+    badge: "NEW YEAR",
+    expertLabel: "신년운세 분석",
+    concernLabel: "궁금한 점",
+    concernPlaceholder: "이 해에 특히 궁금한 부분이 있으신가요? (일, 연애, 재물, 건강 등)",
+    needsSecondPerson: false,
+    needsTargetYear: true,
+    needsStage: false,
+    needsPeriod: false,
+    needsRelationshipStatus: false,
+    needsRelationshipDuration: false,
+    reportFocus: `입력된 "조회 연도"를 기준으로 그 해의 신년운세를 분석하십시오. 그 해의 세운(년주 간지)과 타고난 사주 원국의 상호작용, 그리고 그 시기의 점성술 트랜짓을 함께 보십시오. ① 그 해 전체 흐름 총평 ② 상반기 주요 포인트 ③ 하반기 주요 포인트 ④ 이 해에 특히 좋은 기회의 시기 ⑤ 조심해야 할 시기와 이유 ⑥ 이 해의 재물·건강·인간관계 중 특히 신경 쓸 영역 ⑦ 이 해에 시도하면 좋은 것 ⑧ 최우선 조언 3가지.`,
+  },
+};
+const REPORT_COMMON_RULES = `계산 원칙:
+- 사주: 법정시·절입(節入)·진태양시를 반영해 원국·십성·오행·대운·세운의 흐름을 논리적으로 추론하십시오. 사용자 메시지에 주어진 년주·월주·일주·시주(및 해당 시 세운)는 모두 이미 정밀 계산되어 입력값으로 주어지니 그대로 사용하고 다시 추측하지 마십시오. 단, 시주가 "계산 불가"로 표시된 경우(출생시각 미상)에는 참고 수준으로만 다루고 정확도가 낮음을 밝히십시오.
 - 점성술: 트로피컬 조디악과 플라시두스 하우스 시스템 기준으로, 사용자 메시지에 주어진 출생지 위도·경도·시간대(이미 계산됨, 다시 추측하지 말 것)를 사용해 ASC·MC·행성 위치·하우스·주요 각(어스펙트)·현재 트랜짓/프로그레션 흐름을 추론하십시오. 해외 도시는 서머타임(DST) 이력이 반영되지 않았을 수 있으니, 한국 외 지역이면 이 한계를 confidence 항목에 밝히십시오.
 - 출생 시각을 모르거나 출생지 정보가 부족하면 임의로 지어내지 말고, 그로 인해 어떤 항목의 정확도가 낮아지는지를 confidence 항목에서 먼저 명확히 밝히십시오.
 - 사주와 점성술 해석 중 서로 공통적으로 나타나는 신호, 한쪽에서만 나타나는 신호, 서로 충돌하는 신호를 구분하고, 각 신호의 신뢰도(높음/중간/낮음)를 basis 안에 표시하십시오.
@@ -377,39 +474,47 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 1000) {
 - 문자열 값 안에서는 큰따옴표(")를 쓰지 마십시오. 강조나 인용이 필요하면 작은따옴표(')나 「」를 대신 사용하십시오 (JSON 파싱 오류 방지).
 - "summary"와 "points"는 초등학교 고학년도 이해할 수 있는 쉬운 단어와 짧은 문장으로 쓰십시오. 어려운 한자어·전문용어·신비주의적 과장 표현을 피하고, 필요하면 쉬운 비유를 쓰십시오. 단, 유치한 말투가 아니라 신뢰감 있는 어른스러운 톤을 유지하십시오.
 - "basis"는 전문가가 보는 근거란입니다. 여기서는 오행·십성·하우스·어스펙트·트랜짓 등 전문 용어를 정확히 사용해 근거와 신뢰도를 밝히십시오.
-- 아래 JSON 스키마를 정확히 따르십시오:
+- 아래 JSON 스키마를 정확히 따르되, sections 배열의 각 항목 수와 내용은 "리포트에 담을 내용" 지침의 번호(①~⑧)를 그대로 따르십시오:
 {
   "confidence": {
     "summary": "계산 조건과 정확도를 쉬운 말로 한두 문장",
-    "detail": "출생시각·출생지 등 입력 한계에 따른 전문적인 정확도 설명 (전문용어 사용 가능)"
+    "detail": "입력 한계에 따른 전문적인 정확도 설명 (전문용어 사용 가능)"
   },
   "sections": [
-    {"number": "①", "title": "핵심 적성·강점·취약점", "summary": "결론을 쉬운 말 1~2문장으로", "points": ["쉬운말 포인트1", "포인트2", "포인트3"], "basis": "사주/점성술 전문 근거와 신뢰도"},
-    {"number": "②", "title": "잘 맞는 역할 3가지", "summary": "...", "points": ["...", "...", "..."], "basis": "..."},
-    {"number": "③", "title": "구체적 직업 TOP 10", "summary": "...", "points": ["직업1: 한줄이유", "직업2: 한줄이유", "...최대10개"], "basis": "..."},
-    {"number": "④", "title": "단계별 진로전략", "summary": "...", "points": ["...", "...", "..."], "basis": "..."},
-    {"number": "⑤", "title": "잘 맞는 업무환경·리듬", "summary": "...", "points": ["...", "...", "..."], "basis": "..."},
-    {"number": "⑥", "title": "사업·재물운", "summary": "...", "points": ["타고난 구조: ...", "요즘 시기운: ..."], "basis": "..."},
-    {"number": "⑦", "title": "수익모델·리스크", "summary": "...", "points": ["...", "...", "..."], "basis": "..."},
-    {"number": "⑧", "title": "최우선 선택과 실행전략 3가지", "summary": "...", "points": ["1. ...", "2. ...", "3. ..."], "basis": "..."}
+    {"number": "①", "title": "...", "summary": "결론을 쉬운 말 1~2문장으로", "points": ["...", "...", "..."], "basis": "사주/점성술 전문 근거와 신뢰도"}
   ]
-}
-"period" 값 기준으로 ⑧ 항목의 실행전략을 작성하십시오.`;
-const CARD_SYSTEM_PROMPT = `아래는 한 사람의 사주×점성술 교차 진로분석 리포트입니다. 이 내용을 압축해 아래 JSON 스키마로만 응답하십시오. 다른 설명, 서두, 마크다운 코드펜스 없이 순수 JSON만 출력하십시오.
-{  "identity": "핵심 정체성 한 문단 (80자 내외)",
-  "strengths": ["강점1(20자내)", "강점2", "강점3"],
-  "risks": ["리스크1(20자내)", "리스크2", "리스크3"],
-  "jobs": ["직업1", "직업2", "직업3", "직업4", "직업5"],
-  "rhythm": "업무 리듬 한 줄 요약(30자 내외)",
-  "revenue_model": "수익구조 한 줄 요약(30자 내외)",
-  "milestones": [
-    {"age": "20대 후반", "event": "변곡점 설명(20자내)"},
-    {"age": "30대 초반", "event": "..."},
-    {"age": "30대 후반", "event": "..."},
-    {"age": "40대", "event": "..."}
-  ],
-  "priority_strategy": "최우선 전략 한 문단(60자 내외)"
 }`;
+function buildReportSystemPrompt(genreId) {
+  const g = GENRES[genreId] || GENRES.career;
+  return `당신은 사주명리학과 서양점성술을 모두 정통한 ${g.expertLabel} 전문가입니다.
+${REPORT_COMMON_RULES}
+
+리포트에 담을 내용 (장르: ${g.label}):
+${g.reportFocus}`;
+}
+function buildCardSystemPrompt(genreId) {
+  const g = GENRES[genreId] || GENRES.career;
+  return `아래는 사주×점성술 교차해석 ${g.label} 리포트입니다. 이 내용을 압축해 아래 JSON 스키마로만 응답하십시오. 다른 설명, 서두, 마크다운 코드펜스 없이 순수 JSON만 출력하십시오. 문자열 값 안에서는 큰따옴표(")를 쓰지 마십시오.
+{
+  "identity": "핵심 정체성/총평 한 문단 (80자 내외)",
+  "strengths": ["강점1(20자내)", "강점2", "강점3"],
+  "risks": ["주의할 점1(20자내)", "주의할 점2", "주의할 점3"],
+  "highlights_title": "이 리포트 장르(${g.label})에 맞는 항목 제목 (예: 추천 직업 TOP 5, 잘 맞는 상대 TOP 5, 이 해의 기회 포인트 등, 15자 내외)",
+  "highlights": ["항목1", "항목2", "항목3", "항목4", "항목5"],
+  "note1_label": "짧은 라벨(6자내)",
+  "note1": "한 줄 설명(30자 내외)",
+  "note2_label": "짧은 라벨(6자내)",
+  "note2": "한 줄 설명(30자 내외)",
+  "timeline_title": "타임라인 제목 (예: 20년 변곡점, 이 해의 흐름 등, 10자 내외)",
+  "milestones": [
+    {"age": "시기1", "event": "설명(20자내)"},
+    {"age": "시기2", "event": "..."},
+    {"age": "시기3", "event": "..."},
+    {"age": "시기4", "event": "..."}
+  ],
+  "priority_strategy": "최우선 전략/조언 한 문단(60자 내외)"
+}`;
+}
 // ============================================================================
 // 3. 카드 이미지 생성
 // ============================================================================
@@ -429,45 +534,52 @@ function wrapText(text, maxChars) {
   });
   if (cur) lines.push(cur);
   return lines;
-}function tspans(lines, x, startY, lineHeight) {
+}
+function tspans(lines, x, startY, lineHeight) {
   return lines
     .map(
       (l, i) =>
         `<tspan x="${x}" y="${startY + i * lineHeight}">${escapeXml(l)}</tspan>`
     )
     .join("");
-}function escapeXml(s) {
+}
+function escapeXml(s) {
   return String(s ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
-}function buildCardSvg(data) {
+}
+function buildCardSvg(data, meta) {
   const W = 1080;
   const H = 1350;
-  const bg = "#0F1229";
-  const panel = "#171B3A";
-  const gold = "#C9A227";
-  const goldLight = "#E8C868";
+  const bg = "#1A1829";
+  const panel = "#241F38";
+  const gold = "#B8A5F2";
+  const goldLight = "#D4C8FA";
   const ivory = "#F2ECDD";
   const teal = "#5B9A93";
   const burgundy = "#B5654F";
+  const titleKo = meta?.titleKo || "운명 프로파일";
+  const titleEn = meta?.titleEn || "DESTINY PROFILE";
   const identityLines = wrapText(data.identity, 26);
-  const jobLines = (data.jobs || []).slice(0, 5);
+  const highlightLines = (data.highlights || []).slice(0, 5);
+  const highlightsTitle = data.highlights_title || "핵심 포인트 TOP 5";
   const strengthLines = (data.strengths || []).slice(0, 3);
   const riskLines = (data.risks || []).slice(0, 3);
   const milestones = (data.milestones || []).slice(0, 4);
+  const timelineTitle = data.timeline_title || "흐름 타임라인";
   const strategyLines = wrapText(data.priority_strategy, 30);
   let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <defs>
     <linearGradient id="bgGrad" x1="0%" y1="0%" x2="60%" y2="100%">
       <stop offset="0%" stop-color="${bg}"/>
-      <stop offset="100%" stop-color="#1D2350"/>
+      <stop offset="100%" stop-color="#2A2440"/>
     </linearGradient>
   </defs>
   <rect width="${W}" height="${H}" fill="url(#bgGrad)"/>
-  <text x="70" y="120" fill="${gold}" font-size="22" letter-spacing="4" font-family="'Noto Sans KR', sans-serif">CAREER DESTINY PROFILE</text>
-  <text x="70" y="175" fill="${ivory}" font-size="54" font-weight="700" font-family="'Noto Serif KR', serif">커리어 운명 프로파일</text>
+  <text x="70" y="120" fill="${gold}" font-size="22" letter-spacing="4" font-family="'Noto Sans KR', sans-serif">${escapeXml(titleEn)}</text>
+  <text x="70" y="175" fill="${ivory}" font-size="54" font-weight="700" font-family="'Noto Serif KR', serif">${escapeXml(titleKo)}</text>
   <line x1="70" y1="205" x2="${W - 70}" y2="205" stroke="${gold}" stroke-width="1" opacity="0.5"/>
   <text fill="${ivory}" font-size="30" font-family="'Noto Serif KR', serif" font-weight="700">${tspans(
     identityLines,
@@ -476,7 +588,7 @@ function wrapText(text, maxChars) {
     42
   )}</text>
   <text x="70" y="${270 + identityLines.length * 42 + 60}" fill="${teal}" font-size="24" font-weight="700" font-family="'Noto Sans KR', sans-serif">강점</text>
-  <text x="${W / 2 + 20}" y="${270 + identityLines.length * 42 + 60}" fill="${burgundy}" font-size="24" font-weight="700" font-family="'Noto Sans KR', sans-serif">리스크</text>
+  <text x="${W / 2 + 20}" y="${270 + identityLines.length * 42 + 60}" fill="${burgundy}" font-size="24" font-weight="700" font-family="'Noto Sans KR', sans-serif">주의할 점</text>
   ${strengthLines
     .map(
       (s, i) =>
@@ -498,37 +610,37 @@ function wrapText(text, maxChars) {
     )
     .join("")}
   ${(() => {
-    const jobsTop = 270 + identityLines.length * 42 + 100 + 3 * 40 + 50;
-    return `<text x="70" y="${jobsTop}" fill="${gold}" font-size="26" font-weight="700" font-family="'Noto Sans KR', sans-serif">추천 직업 TOP 5</text>
-    ${jobLines
+    const topY = 270 + identityLines.length * 42 + 100 + 3 * 40 + 50;
+    return `<text x="70" y="${topY}" fill="${gold}" font-size="26" font-weight="700" font-family="'Noto Sans KR', sans-serif">${escapeXml(highlightsTitle)}</text>
+    ${highlightLines
       .map(
         (j, i) =>
-          `<text x="70" y="${jobsTop + 46 + i * 44}" fill="${ivory}" font-size="24" font-family="'Noto Serif KR', serif">${i +
+          `<text x="70" y="${topY + 46 + i * 44}" fill="${ivory}" font-size="24" font-family="'Noto Serif KR', serif">${i +
             1}. ${escapeXml(j)}</text>`
       )
       .join("")}`;
   })()}
   ${(() => {
-    const jobsTop = 270 + identityLines.length * 42 + 100 + 3 * 40 + 50;
-    const y = jobsTop + 46 + 5 * 44 + 40;
+    const topY = 270 + identityLines.length * 42 + 100 + 3 * 40 + 50;
+    const y = topY + 46 + 5 * 44 + 40;
     return `<rect x="70" y="${y}" width="${W - 140}" height="112" rx="10" fill="${panel}" stroke="${gold}" stroke-width="1" opacity="0.9"/>
-    <text x="94" y="${y + 40}" fill="${teal}" font-size="20" font-weight="700" font-family="'Noto Sans KR', sans-serif">업무 리듬 — ${escapeXml(
-      data.rhythm
+    <text x="94" y="${y + 40}" fill="${teal}" font-size="20" font-weight="700" font-family="'Noto Sans KR', sans-serif">${escapeXml(data.note1_label || "포인트")} — ${escapeXml(
+      data.note1
     )}</text>
-    <text x="94" y="${y + 82}" fill="${burgundy}" font-size="20" font-weight="700" font-family="'Noto Sans KR', sans-serif">수익구조 — ${escapeXml(
-      data.revenue_model
+    <text x="94" y="${y + 82}" fill="${burgundy}" font-size="20" font-weight="700" font-family="'Noto Sans KR', sans-serif">${escapeXml(data.note2_label || "포인트")} — ${escapeXml(
+      data.note2
     )}</text>`;
   })()}
   ${(() => {
-    const jobsTop = 270 + identityLines.length * 42 + 100 + 3 * 40 + 50;
-    const boxY = jobsTop + 46 + 5 * 44 + 40;
+    const topY = 270 + identityLines.length * 42 + 100 + 3 * 40 + 50;
+    const boxY = topY + 46 + 5 * 44 + 40;
     const tY = boxY + 112 + 70;
     const lx1 = 100;
     const lx2 = W - 100;
     const step = (lx2 - lx1) / 3;
     let out = `<text x="70" y="${
       tY - 30
-    }" fill="${gold}" font-size="24" font-weight="700" font-family="'Noto Sans KR', sans-serif">20년 변곡점</text>
+    }" fill="${gold}" font-size="24" font-weight="700" font-family="'Noto Sans KR', sans-serif">${escapeXml(timelineTitle)}</text>
     <line x1="${lx1}" y1="${tY}" x2="${lx2}" y2="${tY}" stroke="${gold}" stroke-width="2" opacity="0.6"/>`;
     milestones.forEach((m, i) => {
       const x = lx1 + step * i;
@@ -547,8 +659,8 @@ function wrapText(text, maxChars) {
     return out;
   })()}
   ${(() => {
-    const jobsTop = 270 + identityLines.length * 42 + 100 + 3 * 40 + 50;
-    const boxY = jobsTop + 46 + 5 * 44 + 40;
+    const topY = 270 + identityLines.length * 42 + 100 + 3 * 40 + 50;
+    const boxY = topY + 46 + 5 * 44 + 40;
     const tY = boxY + 112 + 70;
     const stratY = tY + 90;
     return `<rect x="70" y="${stratY}" width="${W - 140}" height="${
@@ -565,7 +677,8 @@ function wrapText(text, maxChars) {
   <text x="70" y="${H - 30}" fill="${ivory}" font-size="15" opacity="0.55" font-family="'Noto Sans KR', sans-serif">정밀 사주 계산 엔진 + AI 교차해석 · 참고용이며 전문 상담을 대체하지 않습니다</text>
 </svg>`;
   return svg;
-}async function svgToJpegDataUrl(svgString, width, height) {
+}
+async function svgToJpegDataUrl(svgString, width, height) {
   const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   try {
@@ -579,15 +692,26 @@ function wrapText(text, maxChars) {
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#0F1229";
+    ctx.fillStyle = "#1A1829";
     ctx.fillRect(0, 0, width, height);
     ctx.drawImage(img, 0, 0, width, height);
     return canvas.toDataURL("image/jpeg", 0.92);
   } finally {
     URL.revokeObjectURL(url);
   }
-}// ============================================================================
-// 4. React 컴포넌트
+}
+// ============================================================================
+// 4. 후기(테스트모니얼) — 실제 후기가 쌓이면 이 배열만 바꿔서 교체하세요
+// ============================================================================
+const TESTIMONIALS = [
+  { name: "30대 직장인 김**", genre: "진로", rating: 5, text: "이직 고민 중이었는데 방향을 잡는 데 진짜 도움 됐어요. 왜 그렇게 나왔는지 근거까지 보여줘서 신뢰가 갔어요." },
+  { name: "20대 취준생 이**", genre: "연애운", rating: 5, text: "썸 타는 사람이랑 왜 자꾸 어긋나는지 알 것 같았어요. 쉬운 말로 설명해줘서 이해가 잘 됐습니다." },
+  { name: "40대 자영업 박**", genre: "재물운", rating: 4, text: "재테크 성향을 객관적으로 짚어준 느낌이라 좋았어요. 구체적 종목 추천은 없어서 아쉬웠지만 방향 잡는 덴 충분했어요." },
+  { name: "30대 커플 최**·정**", genre: "궁합", rating: 5, text: "둘이 왜 자주 부딪히는지 패턴을 짚어줘서 대화하는 데 도움이 많이 됐어요." },
+  { name: "20대 대학생 한**", genre: "신년운세", rating: 5, text: "올해 조심해야 할 시기를 미리 알려줘서 유용했어요. 카드 이미지도 예뻐서 저장해뒀어요." },
+];
+// ============================================================================
+// 5. React 컴포넌트
 // ============================================================================
 function Field({ label, children }) {
   return (
@@ -596,7 +720,7 @@ function Field({ label, children }) {
         style={{
           display: "block",
           fontSize: 13,
-          color: "#B9AF8E",
+          color: "#A79ECC",
           marginBottom: 6,
           letterSpacing: 0.5,
         }}
@@ -606,11 +730,12 @@ function Field({ label, children }) {
       {children}
     </label>
   );
-}const inputStyle = {
+}
+const inputStyle = {
   width: "100%",
   boxSizing: "border-box",
-  background: "#171B3A",
-  border: "1px solid #3A3F6B",
+  background: "#241F38",
+  border: "1px solid #453B6B",
   borderRadius: 8,
   color: "#F2ECDD",
   padding: "10px 12px",
@@ -618,18 +743,106 @@ function Field({ label, children }) {
   fontFamily: "'Noto Sans KR', sans-serif",
 };
 const STAGES = ["학생", "취준", "직장", "사업"];
-export default function CareerProfileDemo() {
+const EMPTY_PERSON_FIELDS = {
+  birthDate: "",
+  gender: "여성",
+  birthTime: "",
+  timeUnknown: false,
+  birthPlace: "",
+};
+function BirthFields({ prefix, form, update, title }) {
+  return (
+    <div>
+      {title && (
+        <div style={{ color: "#B8A5F2", fontSize: 14, fontWeight: 700, margin: "20px 0 12px" }}>
+          {title}
+        </div>
+      )}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <Field label="양력 생일">
+          <input
+            type="date"
+            style={inputStyle}
+            value={form[prefix + "birthDate"]}
+            onChange={update(prefix + "birthDate")}
+          />
+        </Field>
+        <Field label="성별">
+          <select style={inputStyle} value={form[prefix + "gender"]} onChange={update(prefix + "gender")}>
+            <option>여성</option>
+            <option>남성</option>
+          </select>
+        </Field>
+        <Field label="출생시각">
+          <input
+            type="time"
+            style={{ ...inputStyle, opacity: form[prefix + "timeUnknown"] ? 0.4 : 1 }}
+            value={form[prefix + "birthTime"]}
+            onChange={update(prefix + "birthTime")}
+            disabled={form[prefix + "timeUnknown"]}
+          />
+          <label style={{ fontSize: 12, color: "#A79ECC", marginTop: 6, display: "block" }}>
+            <input
+              type="checkbox"
+              checked={form[prefix + "timeUnknown"]}
+              onChange={update(prefix + "timeUnknown")}
+              style={{ marginRight: 6 }}
+            />
+            정확한 시각을 모름
+          </label>
+        </Field>
+        <Field label="출생지">
+          <input
+            type="text"
+            placeholder="예: 서울특별시"
+            style={inputStyle}
+            value={form[prefix + "birthPlace"]}
+            onChange={update(prefix + "birthPlace")}
+          />
+        </Field>
+      </div>
+    </div>
+  );
+}
+function parseHourMinute(birthTime, timeUnknown) {
+  if (timeUnknown || !birthTime) return { hour: 12, minute: 0 };
+  const [hh, mm] = birthTime.split(":");
+  const hour = parseInt(hh, 10);
+  const minute = parseInt(mm, 10);
+  return {
+    hour: Number.isNaN(hour) ? 12 : hour,
+    minute: Number.isNaN(minute) ? 0 : minute,
+  };
+}
+function chartToPromptBlock(label, chartResult) {
+  return `[${label} 정밀 계산 결과 - 아래 값은 실제 계산된 값이므로 그대로 사용하고 다시 추측하지 마십시오]
+- 출생지 인식 결과: ${chartResult.location?.name || "?"} (위도 ${chartResult.location?.lat?.toFixed(2) || "?"}, 경도 ${chartResult.location?.lon?.toFixed(2) || "?"}, 시간대 UTC+${chartResult.location?.tz ?? "?"}) ${chartResult.location?.matched ? "" : "— 정확히 매칭되지 않아 한국 평균 좌표로 대체됨, 정확도 낮음"}
+- 진태양시 보정: ${chartResult.location?.trueSolarOffsetMinutes ?? "?"}분
+- 년주: ${chartResult.yearPillar?.ganzhi || "계산 실패"} (${chartResult.yearPillar?.stemElement || "?"}${chartResult.yearPillar?.branchElement || "?"})
+- 월주: ${chartResult.monthPillar?.ganzhi || "계산 실패"} (${chartResult.monthPillar?.stemElement || "?"}${chartResult.monthPillar?.branchElement || "?"})
+- 일주: ${chartResult.dayPillar?.ganzhi || "계산 실패"} (${chartResult.dayPillar?.stemElement || "?"}${chartResult.dayPillar?.branchElement || "?"})
+- 시주: ${chartResult.hourPillar ? `${chartResult.hourPillar.ganzhi} (${chartResult.hourPillar.stemElement}${chartResult.hourPillar.branchElement})` : "출생시각 미상으로 계산 불가"}
+- 절기: ${chartResult.solarLongitude?.seasonalNode || "?"}`;
+}
+export default function DestinyProfileApp() {
+  const [genre, setGenre] = useState("career");
+  const currentYear = new Date().getFullYear();
   const [form, setForm] = useState({
-    birthDate: "",
-    gender: "여성",
-    birthTime: "",
-    timeUnknown: false,
-    birthPlace: "",
+    ...EMPTY_PERSON_FIELDS,
     stage: "직장",
     period: "1년",
     concern: "",
+    targetYear: String(currentYear + 1),
+    relationshipStatus: "연애 중",
+    relationshipDuration: "",
+    b_birthDate: "",
+    b_gender: "여성",
+    b_birthTime: "",
+    b_timeUnknown: false,
+    b_birthPlace: "",
   });
   const [chart, setChart] = useState(null);
+  const [chart2, setChart2] = useState(null);
   const [chartError, setChartError] = useState("");
   const [reportData, setReportData] = useState(null);
   const [reportRawText, setReportRawText] = useState("");
@@ -639,6 +852,7 @@ export default function CareerProfileDemo() {
   const [cardError, setCardError] = useState("");
   const [cardImage, setCardImage] = useState("");
   const reportRef = useRef(null);
+  const g = GENRES[genre];
   const update = (key) => (e) => {
     const val =
       e && e.target
@@ -648,40 +862,56 @@ export default function CareerProfileDemo() {
         : e;
     setForm((f) => ({ ...f, [key]: val }));
   };
-  // 출생시각 입력을 시/분 숫자로 안전하게 변환 (미입력·모름 체크 시 정오로 대체)
-  function getHourMinuteFromForm(f) {
-    if (f.timeUnknown || !f.birthTime) return { hour: 12, minute: 0 };
-    const [hh, mm] = f.birthTime.split(":");
-    const hour = parseInt(hh, 10);
-    const minute = parseInt(mm, 10);
-    return {
-      hour: Number.isNaN(hour) ? 12 : hour,
-      minute: Number.isNaN(minute) ? 0 : minute,
-    };
+  function handleGenreChange(nextGenre) {
+    setGenre(nextGenre);
+    setChart(null);
+    setChart2(null);
+    setChartError("");
+    setReportData(null);
+    setReportError("");
+    setCardImage("");
+    setCardError("");
+  }
+  function computeChartFor(prefix, f) {
+    const dateStr = f[prefix + "birthDate"];
+    const [y, m, d] = dateStr.split("-").map(Number);
+    const { hour, minute } = parseHourMinute(f[prefix + "birthTime"], f[prefix + "timeUnknown"]);
+    return calculateNatalChart({
+      year: y,
+      month: m,
+      day: d,
+      hour,
+      minute,
+      birthPlace: f[prefix + "birthPlace"],
+      timeUnknown: f[prefix + "timeUnknown"],
+    });
   }
   async function handleCalculateChart() {
     setChartError("");
     setChart(null);
+    setChart2(null);
     if (!form.birthDate || !form.birthPlace) {
       setChartError("양력 생일, 출생지는 필수 입력입니다.");
       return;
     }
+    if (g.needsSecondPerson && (!form.b_birthDate || !form.b_birthPlace)) {
+      setChartError("상대방의 양력 생일, 출생지도 입력해주세요.");
+      return;
+    }
     try {
-      const [y, m, d] = form.birthDate.split("-").map(Number);
-      const { hour: h, minute: min } = getHourMinuteFromForm(form);
-      const result = calculateNatalChart({
-        year: y,
-        month: m,
-        day: d,
-        hour: h,
-        minute: min,
-        birthPlace: form.birthPlace,
-        timeUnknown: form.timeUnknown,
-      });
+      const result = computeChartFor("", form);
       if (result.error) {
         setChartError(result.error);
-      } else {
-        setChart(result);
+        return;
+      }
+      setChart(result);
+      if (g.needsSecondPerson) {
+        const result2 = computeChartFor("b_", form);
+        if (result2.error) {
+          setChartError("상대방 정보 오류: " + result2.error);
+          return;
+        }
+        setChart2(result2);
       }
     } catch (e) {
       setChartError("계산 오류: " + e.message);
@@ -692,44 +922,67 @@ export default function CareerProfileDemo() {
     setCardImage("");
     setCardError("");
     if (!form.birthDate || !form.birthPlace || !form.concern) {
-      setReportError("양력 생일, 출생지, 고민은 필수 입력입니다.");
+      setReportError(`양력 생일, 출생지, ${g.concernLabel}은 필수 입력입니다.`);
+      return;
+    }
+    if (g.needsSecondPerson && (!form.b_birthDate || !form.b_birthPlace)) {
+      setReportError("상대방의 양력 생일, 출생지도 입력해주세요.");
       return;
     }
     setReportLoading(true);
     try {
-      const [y, m, d] = form.birthDate.split("-").map(Number);
-      const { hour: reportHour, minute: reportMinute } = getHourMinuteFromForm(form);
-      const chartResult = calculateNatalChart({
-        year: y,
-        month: m,
-        day: d,
-        hour: reportHour,
-        minute: reportMinute,
-        birthPlace: form.birthPlace,
-        timeUnknown: form.timeUnknown,
-      });
-      if (chartResult.error) {
-        throw new Error(chartResult.error);
+      const chartResult = computeChartFor("", form);
+      if (chartResult.error) throw new Error(chartResult.error);
+
+      let chartResult2 = null;
+      if (g.needsSecondPerson) {
+        chartResult2 = computeChartFor("b_", form);
+        if (chartResult2.error) throw new Error("상대방 정보 오류: " + chartResult2.error);
       }
-      const userPrompt = `[의뢰인 정보]
+
+      let extraBlock = "";
+      if (g.needsSecondPerson) {
+        extraBlock =
+          chartToPromptBlock("A(본인)", chartResult) + "\n\n" + chartToPromptBlock("B(상대방)", chartResult2);
+      } else if (g.needsTargetYear) {
+        const ty = parseInt(form.targetYear, 10) || currentYear + 1;
+        const targetYearPillar = calculateYearPillar(ty);
+        extraBlock =
+          chartToPromptBlock("의뢰인", chartResult) +
+          `\n\n[조회 연도: ${ty}년 — 세운(그 해의 년주 간지)]\n- 세운: ${targetYearPillar.ganzhi} (${targetYearPillar.stemElement}${targetYearPillar.branchElement})`;
+      } else {
+        extraBlock = chartToPromptBlock("의뢰인", chartResult);
+      }
+
+      const contextLines = [];
+      if (g.needsStage) contextLines.push(`- 현재 단계: ${form.stage}`);
+      if (g.needsRelationshipStatus) contextLines.push(`- 현재 연애 여부: ${form.relationshipStatus}`);
+      if (g.needsRelationshipDuration) contextLines.push(`- 만난 기간: ${form.relationshipDuration || "미입력"}`);
+      if (g.needsTargetYear) contextLines.push(`- 조회 연도: ${form.targetYear}년`);
+      if (g.needsPeriod) contextLines.push(`- 기간: ${form.period}`);
+
+      const userPrompt = `[장르: ${g.label}]
+[의뢰인 정보]
 - 양력 생일: ${form.birthDate}
 - 성별: ${form.gender}
 - 출생시각: ${form.timeUnknown ? "모름" : form.birthTime || "미입력"}
 - 출생지: ${form.birthPlace}
-- 현재 단계: ${form.stage}
-- 전략 기간: ${form.period}
-- 고민: ${form.concern}
-[정밀 계산 결과 - 아래 값은 실제 계산된 값이므로 그대로 사용하고 다시 추측하지 마십시오]
-- 출생지 인식 결과: ${chartResult.location?.name || "?"} (위도 ${chartResult.location?.lat?.toFixed(2) || "?"}, 경도 ${chartResult.location?.lon?.toFixed(2) || "?"}, 시간대 UTC+${chartResult.location?.tz ?? "?"}) ${chartResult.location?.matched ? "" : "— 정확히 매칭되지 않아 한국 평균 좌표로 대체됨, 정확도 낮음"}
-- 진태양시 보정: ${chartResult.location?.trueSolarOffsetMinutes ?? "?"}분 (표준시 기준시각과 실제 출생지 경도의 차이)
-- 년주: ${chartResult.yearPillar?.ganzhi || "계산 실패"} (${chartResult.yearPillar?.stemElement || "?"}${chartResult.yearPillar?.branchElement || "?"})
-- 월주: ${chartResult.monthPillar?.ganzhi || "계산 실패"} (${chartResult.monthPillar?.stemElement || "?"}${chartResult.monthPillar?.branchElement || "?"})
-- 일주: ${chartResult.dayPillar?.ganzhi || "계산 실패"} (${chartResult.dayPillar?.stemElement || "?"}${chartResult.dayPillar?.branchElement || "?"})
-- 시주: ${chartResult.hourPillar ? `${chartResult.hourPillar.ganzhi} (${chartResult.hourPillar.stemElement}${chartResult.hourPillar.branchElement})` : "출생시각 미상으로 계산 불가 — 시주 없이 분석하고 이 부분의 정확도 한계를 confidence에 명시할 것"}
-- 절기: ${chartResult.solarLongitude?.seasonalNode || "?"}
-- 태양경도: ${chartResult.solarLongitude?.value || "?"}°
-위 정보를 바탕으로 시스템 지침에 따른 JSON 형식의 진로 분석 리포트를 작성하십시오. ⑧ 항목의 실행전략은 "${form.period}" 기준으로 작성하십시오.`;
-      const text = await callClaude(REPORT_SYSTEM_PROMPT, userPrompt, 4000);
+${contextLines.join("\n")}
+- ${g.concernLabel}: ${form.concern}
+${
+  g.needsSecondPerson
+    ? `[상대방(B) 정보]
+- 양력 생일: ${form.b_birthDate}
+- 성별: ${form.b_gender}
+- 출생시각: ${form.b_timeUnknown ? "모름" : form.b_birthTime || "미입력"}
+- 출생지: ${form.b_birthPlace}
+`
+    : ""
+}
+${extraBlock}
+
+위 정보를 바탕으로 시스템 지침에 따른 JSON 형식의 ${g.label} 리포트를 작성하십시오.`;
+      const text = await callClaude(buildReportSystemPrompt(genre), userPrompt, 4000);
       const parsed = extractJson(text);
       if (!parsed.sections || !Array.isArray(parsed.sections)) {
         throw new Error("리포트 형식이 예상과 달라요");
@@ -749,9 +1002,9 @@ export default function CareerProfileDemo() {
     setCardError("");
     setCardLoading(true);
     try {
-      const json = await callClaude(CARD_SYSTEM_PROMPT, reportRawText, 1500);
+      const json = await callClaude(buildCardSystemPrompt(genre), reportRawText, 1500);
       const data = extractJson(json);
-      const svg = buildCardSvg(data);
+      const svg = buildCardSvg(data, { titleKo: `${g.label} 운명 프로파일`, titleEn: `${g.badge} DESTINY PROFILE` });
       const dataUrl = await svgToJpegDataUrl(svg, 1080, 1350);
       setCardImage(dataUrl);
     } catch (e) {
@@ -764,7 +1017,7 @@ export default function CareerProfileDemo() {
     <div
       style={{
         minHeight: "100vh",
-        background: "linear-gradient(160deg, #0F1229 0%, #1D2350 100%)",
+        background: "linear-gradient(160deg, #1A1829 0%, #2A2440 100%)",
         color: "#F2ECDD",
         fontFamily: "'Noto Sans KR', sans-serif",
         padding: "48px 20px 80px",
@@ -776,123 +1029,120 @@ export default function CareerProfileDemo() {
         input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(0.8); }
       `}</style>
       <div style={{ maxWidth: 720, margin: "0 auto" }}>
-        <div style={{ textAlign: "center", marginBottom: 44 }}>
-          <div
-            style={{
-              fontSize: 13,
-              letterSpacing: 4,
-              color: "#C9A227",
-              marginBottom: 10,
-            }}
-          >
-            CAREER DESTINY PROFILE v2.0
+        <div style={{ textAlign: "center", marginBottom: 32 }}>
+          <div style={{ fontSize: 13, letterSpacing: 4, color: "#B8A5F2", marginBottom: 10 }}>
+            DESTINY PROFILE
           </div>
-          <h1
-            style={{
-              fontFamily: "'Noto Serif KR', serif",
-              fontSize: 40,
-              fontWeight: 900,
-              margin: "0 0 12px",
-            }}
-          >
-            사주 × 점성술 교차해석 진로분석
-          </h1>
-          <p style={{ color: "#B9AF8E", fontSize: 15, lineHeight: 1.6 }}>
-            정밀 사주 계산 엔진 (년주·월주·일주·시주·절기 계산 검증됨)
+          <h1 style={{ fontFamily: "'Noto Serif KR', serif", fontSize: 36, fontWeight: 900, margin: "0 0 14px", lineHeight: 1.4 }}>
+            진로부터 인연, 재물의 흐름까지—
             <br />
-            + Claude AI 교차해석 + 요약 카드 JPG 생성
+            얽힌 삶의 실타래를 한 번에 풀어드립니다.
+          </h1>
+          <p style={{ color: "#A79ECC", fontSize: 15, lineHeight: 1.6 }}>
+            🔮 사주 × 점성술 교차해석
           </p>
         </div>
-        <div
-          style={{
-            background: "#171B3A",
-            border: "1px solid #3A3F6B",
-            borderRadius: 16,
-            padding: 32,
-          }}
-        >
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-            <Field label="양력 생일">
-              <input
-                type="date"
-                style={inputStyle}
-                value={form.birthDate}
-                onChange={update("birthDate")}
-              />
-            </Field>
-            <Field label="성별">
-              <select style={inputStyle} value={form.gender} onChange={update("gender")}>
-                <option>여성</option>
-                <option>남성</option>
-              </select>
-            </Field>
-            <Field label="출생시각">
-              <input
-                type="time"
-                style={{ ...inputStyle, opacity: form.timeUnknown ? 0.4 : 1 }}
-                value={form.birthTime}
-                onChange={update("birthTime")}
-                disabled={form.timeUnknown}
-              />
-              <label style={{ fontSize: 12, color: "#B9AF8E", marginTop: 6, display: "block" }}>
+
+        {/* 장르 선택 탭 */}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center", marginBottom: 36 }}>
+          {Object.values(GENRES).map((item) => (
+            <button
+              key={item.id}
+              onClick={() => handleGenreChange(item.id)}
+              style={{
+                padding: "10px 18px",
+                borderRadius: 999,
+                border: genre === item.id ? "1px solid #D4C8FA" : "1px solid #453B6B",
+                background: genre === item.id ? "rgba(201,162,39,0.18)" : "transparent",
+                color: genre === item.id ? "#D4C8FA" : "#A79ECC",
+                fontSize: 14,
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              {item.emoji} {item.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ background: "#241F38", border: "1px solid #453B6B", borderRadius: 16, padding: 32 }}>
+          <BirthFields prefix="" form={form} update={update} title={g.needsSecondPerson ? "나(A) 정보" : null} />
+          {g.needsSecondPerson && (
+            <BirthFields prefix="b_" form={form} update={update} title="상대방(B) 정보" />
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 20 }}>
+            {g.needsStage && (
+              <Field label="현재 단계">
+                <select style={inputStyle} value={form.stage} onChange={update("stage")}>
+                  {STAGES.map((s) => (
+                    <option key={s}>{s}</option>
+                  ))}
+                </select>
+              </Field>
+            )}
+            {g.needsRelationshipStatus && (
+              <Field label="현재 연애 여부">
+                <select style={inputStyle} value={form.relationshipStatus} onChange={update("relationshipStatus")}>
+                  <option>연애 중</option>
+                  <option>솔로</option>
+                </select>
+              </Field>
+            )}
+            {g.needsRelationshipDuration && (
+              <Field label="만난 기간">
                 <input
-                  type="checkbox"
-                  checked={form.timeUnknown}
-                  onChange={update("timeUnknown")}
-                  style={{ marginRight: 6 }}
+                  type="text"
+                  placeholder="예: 6개월, 1년 3개월"
+                  style={inputStyle}
+                  value={form.relationshipDuration}
+                  onChange={update("relationshipDuration")}
                 />
-                정확한 시각을 모름
-              </label>
-            </Field>
-            <Field label="출생지">
-              <input
-                type="text"
-                placeholder="예: 서울특별시"
-                style={inputStyle}
-                value={form.birthPlace}
-                onChange={update("birthPlace")}
-              />
-            </Field>
-            <Field label="현재 단계">
-              <select style={inputStyle} value={form.stage} onChange={update("stage")}>
-                {STAGES.map((s) => (
-                  <option key={s}>{s}</option>
-                ))}
-              </select>
-            </Field>
-            <Field label="기간 (전략 수립 기준)">
-              <input
-                type="text"
-                placeholder="예: 6개월, 1년, 3년"
-                style={inputStyle}
-                value={form.period}
-                onChange={update("period")}
-              />
-            </Field>
+              </Field>
+            )}
+            {g.needsTargetYear && (
+              <Field label="조회 연도">
+                <input
+                  type="number"
+                  style={inputStyle}
+                  value={form.targetYear}
+                  onChange={update("targetYear")}
+                />
+              </Field>
+            )}
+            {g.needsPeriod && (
+              <Field label="기간 (전략 수립 기준)">
+                <input
+                  type="text"
+                  placeholder="예: 6개월, 1년, 3년"
+                  style={inputStyle}
+                  value={form.period}
+                  onChange={update("period")}
+                />
+              </Field>
+            )}
           </div>
           <div style={{ gridColumn: "1 / -1", marginTop: 4 }}>
-            <Field label="고민">
+            <Field label={g.concernLabel}>
               <textarea
                 rows={4}
-                placeholder="지금 진로에 대해 어떤 고민이 있으신가요?"
+                placeholder={g.concernPlaceholder}
                 style={{ ...inputStyle, resize: "vertical" }}
                 value={form.concern}
                 onChange={update("concern")}
               />
             </Field>
           </div>
-          {chartError && (
-            <div style={{ color: "#E38B7A", fontSize: 14, marginBottom: 12 }}>{chartError}</div>
-          )}
+          {chartError && <div style={{ color: "#E38B7A", fontSize: 14, marginBottom: 12 }}>{chartError}</div>}
           <button
             onClick={handleCalculateChart}
             style={{
               width: "100%",
               padding: "12px 0",
               borderRadius: 10,
-              border: "1px solid #C9A227",
+              border: "1px solid #B8A5F2",
               background: "transparent",
-              color: "#E8C868",
+              color: "#D4C8FA",
               fontSize: 14,
               fontWeight: 700,
               cursor: "pointer",
@@ -904,8 +1154,8 @@ export default function CareerProfileDemo() {
           {chart && !chart.error && (
             <div
               style={{
-                background: "#0F1229",
-                border: "1px solid #3A3F6B",
+                background: "#1A1829",
+                border: "1px solid #453B6B",
                 borderRadius: 10,
                 padding: 16,
                 marginBottom: 12,
@@ -913,56 +1163,53 @@ export default function CareerProfileDemo() {
                 lineHeight: 1.6,
               }}
             >
-              <div style={{ color: "#C9A227", fontWeight: 700, marginBottom: 8 }}>계산 결과</div>
-              <div>
-                🗓️ 년주: <strong>{chart.yearPillar.ganzhi}</strong> ({chart.yearPillar.stemElement}
-                {chart.yearPillar.branchElement})
+              <div style={{ color: "#B8A5F2", fontWeight: 700, marginBottom: 8 }}>
+                계산 결과{g.needsSecondPerson ? " — 나(A)" : ""}
               </div>
-              <div>
-                🌙 월주: <strong>{chart.monthPillar.ganzhi}</strong> ({chart.monthPillar.stemElement}
-                {chart.monthPillar.branchElement})
-              </div>
-              <div>
-                📅 일주: <strong>{chart.dayPillar.ganzhi}</strong> ({chart.dayPillar.stemElement}
-                {chart.dayPillar.branchElement})
-              </div>
+              <div>🗓️ 년주: <strong>{chart.yearPillar.ganzhi}</strong> ({chart.yearPillar.stemElement}{chart.yearPillar.branchElement})</div>
+              <div>🌙 월주: <strong>{chart.monthPillar.ganzhi}</strong> ({chart.monthPillar.stemElement}{chart.monthPillar.branchElement})</div>
+              <div>📅 일주: <strong>{chart.dayPillar.ganzhi}</strong> ({chart.dayPillar.stemElement}{chart.dayPillar.branchElement})</div>
               {chart.hourPillar && (
-                <div>
-                  ⏰ 시주: <strong>{chart.hourPillar.ganzhi}</strong> ({chart.hourPillar.stemElement}
-                  {chart.hourPillar.branchElement})
-                </div>
+                <div>⏰ 시주: <strong>{chart.hourPillar.ganzhi}</strong> ({chart.hourPillar.stemElement}{chart.hourPillar.branchElement})</div>
               )}
-              <div>
-                ☀️ 태양경도: <strong>{chart.solarLongitude.value}°</strong>
-              </div>
-              <div>
-                🌿 절기: <strong>{chart.solarLongitude.seasonalNode}</strong>
-              </div>
+              <div>☀️ 태양경도: <strong>{chart.solarLongitude.value}°</strong></div>
+              <div>🌿 절기: <strong>{chart.solarLongitude.seasonalNode}</strong></div>
               {chart.location && (
                 <div style={{ marginTop: 8 }}>
                   📍 인식된 출생지: <strong>{chart.location.name}</strong>
                   {" "}(위도 {chart.location.lat.toFixed(2)}, 경도 {chart.location.lon.toFixed(2)})
                   {" · 진태양시 보정 "}
-                  <strong>
-                    {chart.location.trueSolarOffsetMinutes >= 0 ? "+" : ""}
-                    {chart.location.trueSolarOffsetMinutes}분
-                  </strong>
+                  <strong>{chart.location.trueSolarOffsetMinutes >= 0 ? "+" : ""}{chart.location.trueSolarOffsetMinutes}분</strong>
                   {!chart.location.matched && (
-                    <div style={{ color: "#E8C868", marginTop: 4 }}>
-                      ⚠️ 입력하신 출생지를 정확히 인식하지 못해 한국 평균 좌표로 계산했어요. 더 정확히 하려면
-                      "서울", "부산"처럼 도시명을 포함해 입력해 주세요.
+                    <div style={{ color: "#D4C8FA", marginTop: 4 }}>
+                      ⚠️ 입력하신 출생지를 정확히 인식하지 못해 한국 평균 좌표로 계산했어요.
                     </div>
                   )}
                 </div>
               )}
-              <div style={{ color: "#B9AF8E", marginTop: 8, fontSize: 12 }}>
-                {chart.note}
-              </div>
+              <div style={{ color: "#A79ECC", marginTop: 8, fontSize: 12 }}>{chart.note}</div>
             </div>
           )}
-          {reportError && (
-            <div style={{ color: "#E38B7A", fontSize: 14, marginBottom: 12 }}>{reportError}</div>
+          {chart2 && !chart2.error && (
+            <div
+              style={{
+                background: "#1A1829",
+                border: "1px solid #453B6B",
+                borderRadius: 10,
+                padding: 16,
+                marginBottom: 12,
+                fontSize: 13,
+                lineHeight: 1.6,
+              }}
+            >
+              <div style={{ color: "#B8A5F2", fontWeight: 700, marginBottom: 8 }}>계산 결과 — 상대방(B)</div>
+              <div>🗓️ 년주: <strong>{chart2.yearPillar.ganzhi}</strong></div>
+              <div>🌙 월주: <strong>{chart2.monthPillar.ganzhi}</strong></div>
+              <div>📅 일주: <strong>{chart2.dayPillar.ganzhi}</strong></div>
+              {chart2.hourPillar && <div>⏰ 시주: <strong>{chart2.hourPillar.ganzhi}</strong></div>}
+            </div>
           )}
+          {reportError && <div style={{ color: "#E38B7A", fontSize: 14, marginBottom: 12 }}>{reportError}</div>}
           <button
             onClick={handleGenerateReport}
             disabled={reportLoading}
@@ -971,49 +1218,79 @@ export default function CareerProfileDemo() {
               padding: "14px 0",
               borderRadius: 10,
               border: "none",
-              background: reportLoading ? "#8a742a" : "#C9A227",
-              color: "#171325",
+              background: reportLoading ? "#7A6FA8" : "#B8A5F2",
+              color: "#1A1829",
               fontSize: 16,
               fontWeight: 700,
               cursor: reportLoading ? "default" : "pointer",
             }}
           >
-            {reportLoading ? "분석 중…" : "전체 진로분석 리포트 생성"}
+            {reportLoading ? "분석 중…" : `전체 ${g.label} 리포트 생성`}
           </button>
         </div>
+
+        {/* 후기 섹션 — 폼 아래로 이동 */}
+        <div style={{ marginTop: 40 }}>
+          <div style={{ textAlign: "center", color: "#B8A5F2", fontSize: 14, fontWeight: 700, marginBottom: 14 }}>
+            먼저 이용해본 분들의 후기
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+            {TESTIMONIALS.map((t, i) => (
+              <div
+                key={i}
+                style={{
+                  background: "#241F38",
+                  border: "1px solid #453B6B",
+                  borderRadius: 12,
+                  padding: "16px 18px",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: "#F2ECDD" }}>{t.name}</span>
+                  <span style={{ fontSize: 11, color: "#B8A5F2", border: "1px solid #B8A5F2", borderRadius: 999, padding: "2px 8px" }}>
+                    {t.genre}
+                  </span>
+                </div>
+                <div style={{ color: "#D4C8FA", fontSize: 13, marginBottom: 6 }}>{"★".repeat(t.rating)}{"☆".repeat(5 - t.rating)}</div>
+                <div style={{ fontSize: 13, color: "#A79ECC", lineHeight: 1.6 }}>{t.text}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
         {reportData && (
           <div ref={reportRef} style={{ marginTop: 40 }}>
             <h2
               style={{
                 fontFamily: "'Noto Serif KR', serif",
                 fontSize: 24,
-                borderBottom: "1px solid #3A3F6B",
+                borderBottom: "1px solid #453B6B",
                 paddingBottom: 12,
                 marginBottom: 20,
               }}
             >
-              진로 분석 리포트
+              {g.label} 분석 리포트
             </h2>
             {reportData.confidence && (
               <div
                 style={{
                   background: "rgba(201,162,39,0.12)",
-                  border: "1px solid #C9A227",
+                  border: "1px solid #B8A5F2",
                   borderRadius: 12,
                   padding: "16px 20px",
                   marginBottom: 20,
                 }}
               >
-                <div style={{ fontSize: 13, color: "#E8C868", fontWeight: 700, marginBottom: 6 }}>
+                <div style={{ fontSize: 13, color: "#D4C8FA", fontWeight: 700, marginBottom: 6 }}>
                   📋 이 결과, 얼마나 믿을 수 있을까요?
                 </div>
                 <div style={{ fontSize: 15, lineHeight: 1.6 }}>{reportData.confidence.summary}</div>
                 {reportData.confidence.detail && (
                   <details style={{ marginTop: 8 }}>
-                    <summary style={{ fontSize: 12, color: "#B9AF8E", cursor: "pointer" }}>
+                    <summary style={{ fontSize: 12, color: "#A79ECC", cursor: "pointer" }}>
                       전문가용 상세 설명 보기
                     </summary>
-                    <div style={{ fontSize: 13, color: "#B9AF8E", marginTop: 6, lineHeight: 1.6 }}>
+                    <div style={{ fontSize: 13, color: "#A79ECC", marginTop: 6, lineHeight: 1.6 }}>
                       {reportData.confidence.detail}
                     </div>
                   </details>
@@ -1021,45 +1298,28 @@ export default function CareerProfileDemo() {
               </div>
             )}
             {(reportData.sections || []).map((section, i) => {
-              const accents = ["#5B9A93", "#C9A227", "#B5654F"];
+              const accents = ["#5B9A93", "#B8A5F2", "#B5654F"];
               const accent = accents[i % accents.length];
               return (
                 <div
                   key={i}
                   style={{
-                    background: "#171B3A",
-                    border: "1px solid #3A3F6B",
+                    background: "#241F38",
+                    border: "1px solid #453B6B",
                     borderLeft: `4px solid ${accent}`,
                     borderRadius: 12,
                     padding: "18px 22px",
                     marginBottom: 14,
                   }}
                 >
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "baseline",
-                      gap: 8,
-                      marginBottom: 10,
-                    }}
-                  >
-                    <span style={{ color: accent, fontSize: 20, fontWeight: 700 }}>
-                      {section.number}
-                    </span>
-                    <span
-                      style={{
-                        fontFamily: "'Noto Serif KR', serif",
-                        fontSize: 19,
-                        fontWeight: 700,
-                      }}
-                    >
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
+                    <span style={{ color: accent, fontSize: 20, fontWeight: 700 }}>{section.number}</span>
+                    <span style={{ fontFamily: "'Noto Serif KR', serif", fontSize: 19, fontWeight: 700 }}>
                       {section.title}
                     </span>
                   </div>
                   {section.summary && (
-                    <div style={{ fontSize: 16, lineHeight: 1.7, marginBottom: 10 }}>
-                      {section.summary}
-                    </div>
+                    <div style={{ fontSize: 16, lineHeight: 1.7, marginBottom: 10 }}>{section.summary}</div>
                   )}
                   {Array.isArray(section.points) && section.points.length > 0 && (
                     <ul style={{ margin: "0 0 10px", paddingLeft: 20, lineHeight: 1.8 }}>
@@ -1072,10 +1332,10 @@ export default function CareerProfileDemo() {
                   )}
                   {section.basis && (
                     <details>
-                      <summary style={{ fontSize: 12, color: "#B9AF8E", cursor: "pointer" }}>
+                      <summary style={{ fontSize: 12, color: "#A79ECC", cursor: "pointer" }}>
                         🔍 전문가 근거 보기 (사주·점성술 용어)
                       </summary>
-                      <div style={{ fontSize: 13, color: "#B9AF8E", marginTop: 6, lineHeight: 1.6 }}>
+                      <div style={{ fontSize: 13, color: "#A79ECC", marginTop: 6, lineHeight: 1.6 }}>
                         {section.basis}
                       </div>
                     </details>
@@ -1084,18 +1344,16 @@ export default function CareerProfileDemo() {
               );
             })}
             <div style={{ textAlign: "center", marginTop: 28 }}>
-              {cardError && (
-                <div style={{ color: "#E38B7A", fontSize: 14, marginBottom: 12 }}>{cardError}</div>
-              )}
+              {cardError && <div style={{ color: "#E38B7A", fontSize: 14, marginBottom: 12 }}>{cardError}</div>}
               <button
                 onClick={handleGenerateCard}
                 disabled={cardLoading}
                 style={{
                   padding: "12px 28px",
                   borderRadius: 10,
-                  border: "1px solid #C9A227",
+                  border: "1px solid #B8A5F2",
                   background: "transparent",
-                  color: "#E8C868",
+                  color: "#D4C8FA",
                   fontSize: 15,
                   fontWeight: 700,
                   cursor: cardLoading ? "default" : "pointer",
@@ -1108,7 +1366,7 @@ export default function CareerProfileDemo() {
               <div style={{ textAlign: "center", marginTop: 28 }}>
                 <img
                   src={cardImage}
-                  alt="커리어 운명 프로파일 카드"
+                  alt={`${g.label} 운명 프로파일 카드`}
                   style={{
                     maxWidth: "100%",
                     width: 380,
@@ -1119,10 +1377,10 @@ export default function CareerProfileDemo() {
                 <div style={{ marginTop: 16 }}>
                   <a
                     href={cardImage}
-                    download="career-destiny-profile.jpg"
+                    download={`${genre}-destiny-profile.jpg`}
                     style={{
-                      color: "#0F1229",
-                      background: "#E8C868",
+                      color: "#1A1829",
+                      background: "#D4C8FA",
                       padding: "10px 22px",
                       borderRadius: 8,
                       fontWeight: 700,
@@ -1137,7 +1395,7 @@ export default function CareerProfileDemo() {
             )}
           </div>
         )}
-        <p style={{ textAlign: "center", color: "#6E6A8F", fontSize: 12, marginTop: 60 }}>
+        <p style={{ textAlign: "center", color: "#8F86B3", fontSize: 12, marginTop: 60 }}>
           정밀 사주 계산 엔진 (년주·월주·일주·시주·절기 검증됨)
           <br />
           출생시각을 모르면 시주만 제외하고 계산돼요
