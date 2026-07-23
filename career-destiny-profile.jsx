@@ -330,38 +330,55 @@ function calculateNatalChart(input) {
 // 2. Claude API 통합
 // ============================================================================
 async function callClaude(systemPrompt, userPrompt, maxTokens = 1000) {
-  // ⚠️ 실제 배포용 버전: 우리 서버의 /api/claude 를 거쳐요 (네이버 클로바 스튜디오 호출).
-  // API 키는 서버에만 있고 브라우저에는 절대 노출되지 않아요.
   let response;
   try {
-    response = await fetch("/api/claude", {
+    response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ system: systemPrompt, prompt: userPrompt, max_tokens: maxTokens }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: maxTokens,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userPrompt }],
+      }),
     });
   } catch (networkErr) {
-    throw new Error("서버(/api/claude)에 연결하지 못했어요: " + networkErr.message);
+    // 이 fetch 방식은 Claude.ai 아티팩트(미리보기) 환경에서만 작동해요.
+    // 직접 배포한 사이트나 다른 개발 환경에서 열면 CORS/인증 문제로 여기서 실패해요 —
+    // 그럴 땐 backend/career-destiny-profile.production.jsx + 서버(api/claude.js)를 대신 쓰세요.
+    throw new Error(
+      "Claude 서버에 연결하지 못했어요. 이 화면을 Claude.ai 미리보기가 아닌 곳에서 열었다면, " +
+        "직접 API를 호출할 수 없어요 — production 버전과 백엔드 서버를 사용해야 해요. (" +
+        networkErr.message +
+        ")"
+    );
   }
   const rawBody = await response.text();
   let data;
   try {
     data = JSON.parse(rawBody);
   } catch (parseErr) {
+    // 서버가 JSON이 아니라 HTML(예: 404 에러 페이지) 등을 돌려준 경우 — 원인을 바로 알 수 있게 안내
     throw new Error(
       `서버가 JSON이 아닌 응답을 보냈어요 (상태 코드 ${response.status}). ` +
-        `/api/claude 경로가 없거나(404) 배포가 잘못됐을 가능성이 커요. ` +
+        `주소 자체가 없거나(404) 서버 설정이 잘못됐을 가능성이 커요. ` +
         `응답 시작 부분: ${rawBody.slice(0, 120)}`
     );
   }
   if (!response.ok) {
-    throw new Error(data?.error || `API 호출 실패 (상태 코드 ${response.status})`);
+    throw new Error(data?.error?.message || `API 호출 실패 (상태 코드 ${response.status})`);
   }
   if (data.stop_reason === "max_tokens") {
+    // 응답이 글자 수 한도에 걸려 중간에 잘린 경우 — JSON이 끊겨서 파싱이 실패하는 가장 흔한 원인
     throw new Error(
       `응답이 글자 수 한도(max_tokens=${maxTokens})에 걸려 중간에 잘렸어요. 리포트가 길어서 그런 거니 한도를 늘려야 해요.`
     );
   }
-  return data.text || "";
+  const text = (data.content || [])
+    .map((b) => (b.type === "text" ? b.text : ""))
+    .filter(Boolean)
+    .join("\n");
+  return text;
 }
 function extractJson(text) {
   const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
