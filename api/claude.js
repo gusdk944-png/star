@@ -29,16 +29,15 @@ module.exports = async function handler(req, res) {
 
   const apiKey = process.env.NCP_CLOVASTUDIO_API_KEY;
   if (!apiKey) {
-    // 서버에 키가 등록 안 돼 있으면 여기서 바로 막아요 (배포 설정 실수를 빨리 알아채기 위함)
     return res.status(500).json({
       error: "서버에 네이버 클로바 API 키가 설정되지 않았어요. 관리자에게 문의하세요.",
     });
   }
-  // Request ID는 환경변수로 등록해뒀으면 그 값을 쓰고, 없으면 매 요청마다 자동 생성
   const requestId = process.env.NCP_CLOVASTUDIO_REQUEST_ID || crypto.randomUUID();
 
   try {
-    const response = await fetch("https://clovastudio.stream.ntruss.com/v1/chat-completions/HCX-005", {
+    // HCX-005는 v3 API에서만 지원돼요 (v1에 요청하면 "Unsupported API for model" 오류가 남)
+    const response = await fetch("https://clovastudio.stream.ntruss.com/v3/chat-completions/HCX-005", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -52,10 +51,10 @@ module.exports = async function handler(req, res) {
         ],
         topP: 0.8,
         topK: 0,
-        maxTokens: Math.min(max_tokens || 1000, 4096), // HCX 계열은 최대 4096 토큰까지 요청 가능
+        maxTokens: Math.min(max_tokens || 1000, 4096),
         temperature: 0.5,
-        repeatPenalty: 5.0,
-        stopBefore: [],
+        repetitionPenalty: 1.1,
+        stop: [],
         includeAiFilters: true,
         seed: 0,
       }),
@@ -70,8 +69,7 @@ module.exports = async function handler(req, res) {
     }
 
     const text = data?.result?.message?.content || "";
-    // CLOVA Studio는 "LENGTH"로 잘림을 알려줘요 — 우리 프론트엔드가 기대하는 "max_tokens" 표기로 맞춰줌
-    const stop_reason = data?.result?.stopReason === "LENGTH" ? "max_tokens" : data?.result?.stopReason;
+    const stop_reason = data?.result?.finishReason === "length" ? "max_tokens" : data?.result?.finishReason;
 
     return res.status(200).json({ text, stop_reason });
   } catch (e) {
